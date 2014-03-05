@@ -37,8 +37,6 @@ def make_slack_names_unique(main_constraints_fname):
         del constraints[str(i)]['xi']
         constraints[str(i)]['xi'] = prev_slack_mapping
 
-    # TODO: Remove debugging statement
-    print slack_mappings
     constraints.close()
 
 def main():
