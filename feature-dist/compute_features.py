@@ -12,6 +12,7 @@ import os
 import sys
 import tarfile
 import tempfile
+import fix_constraints
 
 def read_conf(confpath):
     with open(confpath, 'r') as conffile:
@@ -87,8 +88,10 @@ def pack_payload(conf):
     return tarfname
 
 def add_to_end(final, new, i):
-    for index in new.iterkeys():
-        final.copy(new[index], str(i))
+    # Assumes the keys in the file 'new' are consecutive integers starting
+    # from zero
+    for index in range(len(new)):
+        final.copy(new[str(index)], str(i))
         i += 1
     return i
 
@@ -119,7 +122,7 @@ def check_remote_overwrites(conf, logins=None, password=None):
             paths.append(server['path'])
     return hosts, paths
 
-def distribute_jobs(conf, logins=None, password=None, overwrite=False):
+def distribute_jobs(conf, logins=None, password=None, overwrite=False, has_constraints=False):
     if logins is None:
         logins = defaultdict(lambda: None)
     servers = conf['servers']
@@ -164,9 +167,9 @@ def distribute_jobs(conf, logins=None, password=None, overwrite=False):
     print "Waiting for servers to finish..."
     print [stdout.channel.recv_exit_status() for stdout in stdouts]
     print "Done. Collecting results..."
-    collect_results(conf, logins=logins, password=password)
+    collect_results(conf, logins=logins, password=password, has_constraints=has_constraints)
 
-def collect_results(conf, logins=None, password=None):
+def collect_results(conf, logins=None, password=None, has_constraints=False):
     if logins is None:
         logins = defaultdict(lambda: None)
     if not os.path.exists(conf['outfolder']):
@@ -189,6 +192,9 @@ def collect_results(conf, logins=None, password=None):
     i = 0
     for outfile in outfiles:
         i = add_to_end(final_outfile, h5py.File(outfile, 'r'), i)
+    final_outfile.close()
+    if has_constraints:
+        fix_constraints.make_slack_names_unique(conf['outfile'])
     print "Final results in {}.".format(conf['outfile'])
 
 
@@ -198,6 +204,7 @@ if __name__ == '__main__':
     parser.add_argument('loginconf', nargs='?', default='logins.yml')
     parser.add_argument('--overwrite', action='store_true', default=False)
     parser.add_argument('--collect_only', action='store_true', default=False)
+    parser.add_argument('--has_constraints', action='store_true', default=False)
     args = parser.parse_args()
     logins = defaultdict(lambda: None)
     if os.path.exists(args.loginconf):
@@ -206,6 +213,6 @@ if __name__ == '__main__':
     conf = read_conf(args.serverconf)
     pw = getpass.getpass()
     if args.collect_only:
-        collect_results(conf, logins=logins, password=pw)
+        collect_results(conf, logins=logins, password=pw, has_constraints=args.has_constraints)
     else:
-        distribute_jobs(conf, logins=logins, password=pw, overwrite=args.overwrite)
+        distribute_jobs(conf, logins=logins, password=pw, overwrite=args.overwrite, has_constraints=args.has_constraints)

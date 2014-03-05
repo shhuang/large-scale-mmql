@@ -37,11 +37,25 @@ def get_avg_traj_length(fname):
     actions.close()
     return float(total_time_steps) / (2 * num_actions)
 
+def check_concurrent_slack(fname):
+    # Prints out index and start of new slack variable
+    constraints = h5py.File(fname, 'r')
+    if '0' not in constraints:
+        print 'ERROR: Must pass in constraints file'
+        return
+    prev_slack = ""
+    for i in range(len(constraints)):
+        curr_slack = constraints[str(i)]['xi'][()]
+        if curr_slack != prev_slack:
+            print "({}, {})".format(i, curr_slack)
+            prev_slack = curr_slack
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--check_unique_starting_states', type=str)
     parser.add_argument('--get_point_cloud_size', type=str)
     parser.add_argument('--get_traj_length', type=str)
+    parser.add_argument('--check_concurrent_slack', type=str)
     args = parser.parse_args()
 
     if args.check_unique_starting_states:
@@ -60,6 +74,10 @@ def main():
         print "Calculating average trajectory length..."
         avg_traj_length = get_avg_traj_length(args.get_traj_length)
         print "    Average traj length: {} time steps".format(avg_traj_length)
+
+    if args.check_concurrent_slack:
+        print "Printing slack variables to check for concurrency..."
+        check_concurrent_slack(args.check_concurrent_slack)
 
 if __name__ == "__main__":
     main()
