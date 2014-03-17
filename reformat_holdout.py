@@ -15,9 +15,10 @@ def reformat_holdout(orig_holdout_fname, output_holdout_fname):
             continue
         g = output_holdout.create_group(str(i))
         g['demo_id'] = str(k)
-        g['rope_nodes'] = rope_initialization.find_path_through_point_cloud(
-                orig_holdout[k]['cloud_xyz'][()],
-                perturb_peak_dist=None, num_perturb_points=0)
+        g['rope_nodes'] = orig_holdout[k]['cloud_xyz'][()]
+        #g['rope_nodes'] = rope_initialization.find_path_through_point_cloud(
+        #        orig_holdout[k]['cloud_xyz'][()],
+        #        perturb_peak_dist=None, num_perturb_points=0)
         i += 1
     orig_holdout.close()
     output_holdout.close()

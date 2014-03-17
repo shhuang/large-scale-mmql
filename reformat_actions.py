@@ -11,12 +11,13 @@ import argparse, h5py
 
 ARMS = {'l':'leftarm', 'r':'rightarm'}
 
-def reformat_keys(fname):
+def reformat_keys(fname, init_tfm_fname):
     actions = h5py.File(fname, 'r+')
     for k in actions.keys():
         if k.startswith('ar_demo'):
             del actions[k]
             continue
+
         for lr in 'lr':
             g = actions[k].create_group('{}_gripper_tool_frame'.format(lr))
             g['hmat'] = actions[k][ARMS[lr]][()]
@@ -24,14 +25,24 @@ def reformat_keys(fname):
             actions[k]['{}_gripper_joint'.format(lr)] = \
                 actions[k]['{}_gripper'.format(lr)][()]
             del actions[k]['{}_gripper'.format(lr)]
+
+        if init_tfm_fname:
+            init_tfm = h5py.File(init_tfm_fname, 'r')['init_tfm'][()]
+            cloud_xyz = actions[k]['cloud_xyz'][()]
+            cloud_xyz = cloud_xyz.dot(init_tfm[:3,:3].T) + \
+                        init_tfm[:3,3][None,:]
+            del actions[k]['cloud_xyz']
+            actions[k]['cloud_xyz'] = cloud_xyz
+
     actions.close()
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("actionsfile", type=str)
+    parser.add_argument("--inittfmfile")
     args = parser.parse_args()
     
-    reformat_keys(args.actionsfile)
+    reformat_keys(args.actionsfile, args.inittfmfile)
 
 if __name__ == "__main__":
     main()
