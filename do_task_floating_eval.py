@@ -9,6 +9,7 @@ from rapprentice import registration, colorize, berkeley_pr2, \
 from rapprentice import math_utils as mu
 from rapprentice.yes_or_no import yes_or_no
 import pdb, time
+import ropesim_floating
 
 try:
     from rapprentice import pr2_trajectories, PR2
@@ -57,7 +58,7 @@ def blueprint(msg):
 def yellowprint(msg):
     print colorize.colorize(msg, "yellow", bold=True)
 
-def split_trajectory_by_gripper(seg_info):
+def split_trajectory_by_gripper(seg_info, ms_thresh=2):
     rgrip = asarray(seg_info["r_gripper_joint"])
     lgrip = asarray(seg_info["l_gripper_joint"])
 
@@ -77,15 +78,29 @@ def split_trajectory_by_gripper(seg_info):
     after_transitions = before_transitions+1
     seg_starts = np.unique(np.r_[0, after_transitions])
     seg_ends = np.unique(np.r_[before_transitions, n_steps-1])
+    
+    lr_open = {lr:[] for lr in 'lr'}
+    new_seg_starts = []
+    new_seg_ends = []
+    for i in range(len(seg_starts)):
+        if seg_ends[i]- seg_starts[i] >= ms_thresh:
+            new_seg_starts.append(seg_starts[i])
+            new_seg_ends.append(seg_ends[i])
+            lval = True if lgrip[seg_starts[i]] >= thresh else False
+            lr_open['l'].append(lval)
+            rval = True if rgrip[seg_starts[i]] >= thresh else False
+            lr_open['r'].append(rval)
 
-    return seg_starts, seg_ends
+    return new_seg_starts, new_seg_ends, lr_open
 
 def binarize_gripper(angle):
     #thresh = .04
     thresh = GRIPPER_ANGLE_THRESHOLD
     return angle > thresh
-    
-def set_gripper_maybesim(lr, is_open, prev_is_open):
+
+
+
+def set_gripper_sim(lr, is_open, prev_is_open):
     mult = 5
     open_angle = .08 * mult
     closed_angle = .02 * mult
@@ -98,22 +113,18 @@ def set_gripper_maybesim(lr, is_open, prev_is_open):
         print "DONE RELEASING"
 
     # execute gripper open/close trajectory
-    joint_ind = Globals.robot.GetJoint("%s_gripper_l_finger_joint"%lr).GetDOFIndex()
-    start_val = Globals.robot.GetDOFValues([joint_ind])[0]
+    start_val = Globals.sim.grippers[lr].get_gripper_joint_value()
     joint_traj = np.linspace(start_val, target_val, np.ceil(abs(target_val - start_val) / .02))
     for val in joint_traj:
-        Globals.robot.SetDOFValues([val], [joint_ind])
+        Globals.sim.grippers[lr].set_gripper_joint_value(val)
         Globals.sim.step()
-#         if args.animation:
-#                Globals.viewer.Step()
-#             if args.interactive: Globals.viewer.Idle()
+#        if Globals.viewer:
+#            Globals.viewer.Step()
+#            if args.interactive: Globals.viewer.Idle()
     # add constraints if necessary
-    if Globals.viewer:
-        Globals.viewer.Step()
     if not is_open and prev_is_open:
         if not Globals.sim.grab_rope(lr):
             return False
-
     return True
 
 def unwrap_arm_traj_in_place(traj):
@@ -131,39 +142,36 @@ def unwrap_in_place(t):
         unwrap_arm_traj_in_place(t[:,7:])
     else:
         raise NotImplementedError
+    
+    
+def animate_floating_traj(lhmats, rhmats, sim, pause=True, step_viewer=True, callback=None,step=5):
+    assert len(lhmats)==len(rhmats), "I don't know how to animate trajectory with different lengths"
+    if step_viewer or pause: viewer = trajoptpy.GetViewer(sim.env)
+    for i in xrange(len(lhmats)):
+        if callback is not None: callback(i)
+        sim.grippers['r'].set_toolframe_transform(rhmats[i])
+        sim.grippers['l'].set_toolframe_transform(lhmats[i])
+        if pause: viewer.Idle()
+        elif step_viewer and not i%step: viewer.Step()
 
-def sim_traj_maybesim(bodypart2traj, animate=False, interactive=False):
+
+def exec_traj_sim(lr_traj, animate=False, interactive=False, step=1):
     def sim_callback(i):
         Globals.sim.step()
 
-    animate_speed = 10 if animate else 0
-
-    dof_inds = []
-    trajs = []
-    for (part_name, traj) in bodypart2traj.items():
-        manip_name = {"larm":"leftarm","rarm":"rightarm"}[part_name]
-        dof_inds.extend(Globals.robot.GetManipulator(manip_name).GetArmIndices())            
-        trajs.append(traj)
-    full_traj = np.concatenate(trajs, axis=1)
-    Globals.robot.SetActiveDOFs(dof_inds)
-
-    # make the trajectory slow enough for the simulation
-    full_traj = ropesim.retime_traj(Globals.robot, dof_inds, full_traj)
+    lhmats_up, rhmats_up = ropesim_floating.retime_hmats(lr_traj['l'], lr_traj['r'])
 
     # in simulation mode, we must make sure to gradually move to the new starting position
-    curr_vals = Globals.robot.GetActiveDOFValues()
-    transition_traj = np.r_[[curr_vals], [full_traj[0]]]
-    unwrap_in_place(transition_traj)
-    transition_traj = ropesim.retime_traj(Globals.robot, dof_inds, transition_traj, max_cart_vel=.05)
-    animate_traj.animate_traj(transition_traj, Globals.robot, restore=False, pause=interactive,
-        callback=sim_callback, step_viewer=animate_speed)
-    full_traj[0] = transition_traj[-1]
-    unwrap_in_place(full_traj)
+    curr_rtf  = Globals.sim.grippers['r'].get_toolframe_transform()
+    curr_ltf  = Globals.sim.grippers['l'].get_toolframe_transform()
 
-    animate_traj.animate_traj(full_traj, Globals.robot, restore=False, pause=interactive,
-        callback=sim_callback, step_viewer=animate_speed)
-    if Globals.viewer:
-        Globals.viewer.Step()
+    l_transition_hmats, r_transition_hmats = ropesim_floating.retime_hmats([curr_ltf, lhmats_up[0]], [curr_rtf, rhmats_up[0]])
+
+    animate_floating_traj(l_transition_hmats, r_transition_hmats,
+                          Globals.sim, pause=False,
+                          callback=sim_callback, step_viewer=animate, step=step)
+    animate_floating_traj(lhmats_up, rhmats_up, Globals.sim, pause=False,
+                          callback=sim_callback, step_viewer=animate, step=step)
     return True
 
 def load_random_start_segment(demofile):
@@ -245,66 +253,6 @@ def close_traj(traj):
 
     return new_traj
 
-def get_old_joint_traj_ik(ee_hmats, prev_vals, i_start, i_end):
-    old_joint_trajs = {}
-    for lr in 'lr':
-        old_joint_traj = []
-        link_name = "%s_gripper_tool_frame"%lr
-        manip_name = {"l":"leftarm", "r":"rightarm"}[lr]
-        manip = Globals.robot.GetManipulator(manip_name)
-        ik_type = openravepy.IkParameterizationType.Transform6D
-
-        all_x = []
-        x = []
-        for (i, pose_matrix) in enumerate(ee_hmats[link_name]):
-            #ipy.embed()
-            rot_pose_matrix = pose_matrix.dot(TFM_GTF_EE)
-            sols = manip.FindIKSolutions(openravepy.IkParameterization(rot_pose_matrix, ik_type),
-                    #openravepy.IkFilterOptions.IgnoreEndEffectorCollisions)  # TODO: remove after debugging
-                    openravepy.IkFilterOptions.CheckEnvCollisions)
-            all_x.append(i)
-            if sols != []:
-                x.append(i)
-                reference_sol = None
-                for sol in reversed(old_joint_traj):
-                    if sol != None:
-                        reference_sol = sol
-                        break
-                if reference_sol is None:
-                    if prev_vals[lr] is not None:
-                        reference_sol = prev_vals[lr]
-                    else:
-                        reference_sol = L_POSTURES['side'] if lr == 'l' else mirror_arm_joints(L_POSTURES['side'])
-                
-                sols = [closer_angs(sol, reference_sol) for sol in sols]
-                norm_differences = [norm(np.asarray(reference_sol) - np.asarray(sol), 2) for sol in sols]
-                min_index = norm_differences.index(min(norm_differences))
-
-                old_joint_traj.append(sols[min_index])
-
-                blueprint("Openrave IK succeeds")
-            else:
-                redprint("Openrave IK fails")
-
-        if len(x) == 0:
-            if prev_vals[lr] is not None:
-                vals = prev_vals[lr]
-            else:
-                vals = L_POSTURES['side'] if lr == 'l' else mirror_arm_joints(L_POSTURES['side'])
-
-            old_joint_traj_interp = np.tile(vals,(i_end+1-i_start, 1))
-        else:
-            if prev_vals[lr] is not None:
-                old_joint_traj_interp = lerp(all_x, x, old_joint_traj, first=prev_vals[lr])
-            else:
-                old_joint_traj_interp = lerp(all_x, x, old_joint_traj)
-        
-        yellowprint("Openrave IK found %i solutions out of %i."%(len(x), len(all_x)))
-
-        init_traj_close = close_traj(old_joint_traj_interp.tolist())
-        old_joint_trajs[lr] = np.asarray(init_traj_close)
-    return old_joint_trajs
-
 def warp_hmats_tfm(xyz_src, xyz_targ, hmat_list, src_interest_pts = None):
     f, src_params, g, targ_params, cost = registration_cost(xyz_src, xyz_targ, src_interest_pts)
     f = registration.unscale_tps(f, src_params, targ_params)
@@ -317,10 +265,7 @@ def warp_hmats_tfm(xyz_src, xyz_targ, hmat_list, src_interest_pts = None):
     xyz_src_warped = f.transform_points(xyz_src)
     return [trajs, cost, xyz_src_warped]
 
-def simulate_demo(new_xyz, seg_info, animate=False):
-    Globals.robot.SetDOFValues(PR2_L_POSTURES["side"], Globals.robot.GetManipulator("leftarm").GetArmIndices())
-    Globals.robot.SetDOFValues(mirror_arm_joints(PR2_L_POSTURES["side"]), Globals.robot.GetManipulator("rightarm").GetArmIndices())
-    
+def simulate_demo(new_xyz, seg_info, animate=False):    
     redprint("Generating end-effector trajectory")    
     
     handles = []
@@ -339,128 +284,50 @@ def simulate_demo(new_xyz, seg_info, animate=False):
         interest_pts = None
     lr2eetraj = warp_hmats_tfm(old_xyz, new_xyz, hmat_list, interest_pts)[0]
 
-    miniseg_starts, miniseg_ends = split_trajectory_by_gripper(seg_info)    
+    miniseg_starts, miniseg_ends, lr_open = split_trajectory_by_gripper(seg_info)    
     success = True
     print colorize.colorize("mini segments:", "red"), miniseg_starts, miniseg_ends
-    bodypart2trajs = []
+    miniseg_trajs = []
     prev_vals = {lr:None for lr in 'lr'}
     for (i_miniseg, (i_start, i_end)) in enumerate(zip(miniseg_starts, miniseg_ends)):            
 
         ################################    
         redprint("Generating joint trajectory for part %i"%(i_miniseg))
-
-        # figure out how we're gonna resample stuff
-
-        # Use inverse kinematics to get trajectory for initializing TrajOpt,
-        # since demonstrations library does not contain joint angle data for
-        # left and right arms
-        ee_hmats = {}
+        
+        
+        miniseg_traj = {}
         for lr in 'lr':
-            ee_link_name = "%s_gripper_tool_frame"%lr
-            # TODO: Change # of timesteps for resampling?
-            ee_hmats[ee_link_name] = resampling.interp_hmats(np.arange(i_end+1-i_start), np.arange(i_end+1-i_start), lr2eetraj[lr][i_start:i_end+1])
-        lr2oldtraj = get_old_joint_traj_ik(ee_hmats, prev_vals, i_start, i_end)
+            ee_hmats = resampling.interp_hmats(np.arange(i_end+1-i_start), np.arange(i_end+1-i_start), lr2eetraj[lr][i_start:i_end+1])
+            # if arm_moved(ee_hmats):
+            if True:
+                miniseg_traj[lr] = ee_hmats;
+                
+        miniseg_trajs.append(miniseg_traj);
 
-        #lr2oldtraj = {}
-        #for lr in 'lr':
-        #    manip_name = {"l":"leftarm", "r":"rightarm"}[lr]                 
-        #    old_joint_traj = asarray(seg_info[manip_name][i_start:i_end+1])
-        #    #print (old_joint_traj[1:] - old_joint_traj[:-1]).ptp(axis=0), i_start, i_end
-        #    if arm_moved(old_joint_traj):       
-        #        lr2oldtraj[lr] = old_joint_traj   
-
-        if len(lr2oldtraj) > 0:
-            old_total_traj = np.concatenate(lr2oldtraj.values(), 1)
-            JOINT_LENGTH_PER_STEP = .1
-            _, timesteps_rs = unif_resample(old_total_traj, JOINT_LENGTH_PER_STEP)
-        ####
-
-        ### Generate fullbody traj
-        bodypart2traj = {}            
-        for (lr,old_joint_traj) in lr2oldtraj.items():
-            
-            manip_name = {"l":"leftarm", "r":"rightarm"}[lr]
-            
-            old_joint_traj_rs = mu.interp2d(timesteps_rs, np.arange(len(old_joint_traj)), old_joint_traj)
-            
-            ee_link_name = "%s_gripper_tool_frame"%lr
-            new_ee_traj = lr2eetraj[lr][i_start:i_end+1]          
-            new_ee_traj_rs = resampling.interp_hmats(timesteps_rs, np.arange(len(new_ee_traj)), new_ee_traj)
-            print "planning trajectory following"
-            with util.suppress_stdout():
-                new_joint_traj = planning.plan_follow_traj(Globals.robot, manip_name,
-                                                           Globals.robot.GetLink(ee_link_name), new_ee_traj_rs,old_joint_traj_rs)[0]
-            prev_vals[lr] = new_joint_traj[-1]
-            part_name = {"l":"larm", "r":"rarm"}[lr]
-            bodypart2traj[part_name] = new_joint_traj
-            ################################    
-            redprint("Executing joint trajectory for part %i using arms '%s'"%(i_miniseg, bodypart2traj.keys()))
-        bodypart2trajs.append(bodypart2traj)
+        redprint("Executing joint trajectory for part %i using arms '%s'"%(i_miniseg, miniseg_traj.keys()))
         
         for lr in 'lr':
-            gripper_open = binarize_gripper(seg_info["%s_gripper_joint"%lr][i_start])
-            prev_gripper_open = binarize_gripper(seg_info["%s_gripper_joint"%lr][i_start-1]) if i_start != 0 else False
-            if not set_gripper_maybesim(lr, gripper_open, prev_gripper_open):
-                redprint("Grab %s failed" % lr)
+            gripper_open = lr_open[lr][i_miniseg]
+            prev_gripper_open = lr_open[lr][i_miniseg-1] if i_miniseg != 0 else False
+            if not set_gripper_sim(lr, gripper_open, prev_gripper_open):
+                redprint("Grab %s failed"%lr)
                 success = False
 
         if not success: break
-
-        if len(bodypart2traj) > 0:
-            success &= sim_traj_maybesim(bodypart2traj, animate=animate)
+        
+        if len(miniseg_traj) > 0:
+            success &= exec_traj_sim(miniseg_traj, animate=animate)
 
         if not success: break
 
     Globals.sim.settle(animate=animate)
-    Globals.robot.SetDOFValues(PR2_L_POSTURES["side"], Globals.robot.GetManipulator("leftarm").GetArmIndices())
-    Globals.robot.SetDOFValues(mirror_arm_joints(PR2_L_POSTURES["side"]), Globals.robot.GetManipulator("rightarm").GetArmIndices())
     if animate:
         Globals.viewer.Step()
     Globals.sim.release_rope('l')
     Globals.sim.release_rope('r')
     
-    return success, bodypart2trajs
+    return success, miniseg_trajs
 
-
-def simulate_demo_traj(new_xyz, seg_info, bodypart2trajs, animate=False):
-    Globals.robot.SetDOFValues(PR2_L_POSTURES["side"], Globals.robot.GetManipulator("leftarm").GetArmIndices())
-    Globals.robot.SetDOFValues(mirror_arm_joints(PR2_L_POSTURES["side"]), Globals.robot.GetManipulator("rightarm").GetArmIndices())
-    
-    handles = []
-    old_xyz = np.squeeze(seg_info["cloud_xyz"])
-    handles.append(Globals.env.plot3(old_xyz,5, (1,0,0)))
-    handles.append(Globals.env.plot3(new_xyz,5, (0,0,1)))
-    
-    miniseg_starts, miniseg_ends = split_trajectory_by_gripper(seg_info)    
-    success = True
-    print colorize.colorize("mini segments:", "red"), miniseg_starts, miniseg_ends
-    for (i_miniseg, (i_start, i_end)) in enumerate(zip(miniseg_starts, miniseg_ends)):            
-        if i_miniseg >= len(bodypart2trajs): break
-
-        bodypart2traj = bodypart2trajs[i_miniseg]
-
-        for lr in 'lr':
-            gripper_open = binarize_gripper(seg_info["%s_gripper_joint"%lr][i_start])
-            prev_gripper_open = binarize_gripper(seg_info["%s_gripper_joint"%lr][i_start-1]) if i_start != 0 else False
-            if not set_gripper_maybesim(lr, gripper_open, prev_gripper_open):
-                redprint("Grab %s failed" % lr)
-                success = False
-
-        if not success: break
-
-        if len(bodypart2traj) > 0:
-            success &= sim_traj_maybesim(bodypart2traj, animate=animate)
-
-        if not success: break
-
-    Globals.sim.settle(animate=animate)
-    Globals.robot.SetDOFValues(PR2_L_POSTURES["side"], Globals.robot.GetManipulator("leftarm").GetArmIndices())
-    Globals.robot.SetDOFValues(mirror_arm_joints(PR2_L_POSTURES["side"]), Globals.robot.GetManipulator("rightarm").GetArmIndices())
-
-    Globals.sim.release_rope('l')
-    Globals.sim.release_rope('r')
-    
-    return success
 
 def replace_rope(new_rope):
     import bulletsimpy
@@ -480,9 +347,12 @@ def set_rope_transforms(tfs):
     Globals.sim.rope.SetTranslations(tfs[0])
     Globals.sim.rope.SetRotations(tfs[1])
 
-def arm_moved(joint_traj):    
-    if len(joint_traj) < 2: return False
-    return ((joint_traj[1:] - joint_traj[:-1]).ptp(axis=0) > .01).any()
+def arm_moved(hmat_traj):
+    if len(hmat_traj) < 2:
+        return False
+    tts = hmat_traj[:,:3,3]
+    return ((tts[1:] - tts[:-1]).ptp(axis=0) > .01).any()
+
         
 def tpsrpm_plot_cb(x_nd, y_md, targ_Nd, corr_nm, wt_n, f):
     ypred_nd = f.transform_points(x_nd)
@@ -498,10 +368,7 @@ def load_fake_data_segment(demofile, fake_data_segment, fake_data_transform, set
     hmat = openravepy.matrixFromAxisAngle(fake_data_transform[3:6])
     hmat[:3,3] = fake_data_transform[0:3]
     new_xyz = new_xyz.dot(hmat[:3,:3].T) + hmat[:3,3][None,:]
-    r2r = ros2rave.RosToRave(Globals.robot, asarray(fake_seg["joint_states"]["name"]))
-    if set_robot_state:
-        r2r.set_values(Globals.robot, asarray(fake_seg["joint_states"]["position"][0]))
-    return new_xyz, r2r
+    return new_xyz
 
 def unif_resample(traj, max_diff, wt = None):        
     """
@@ -551,21 +418,21 @@ def make_table_xml(translation, extents):
 """ % (translation[0], translation[1], translation[2], extents[0], extents[1], extents[2])
     return xml
 
-PR2_L_POSTURES = dict(
-    untucked = [0.4,  1.0,   0.0,  -2.05,  0.0,  -0.1,  0.0],
-    tucked = [0.06, 1.25, 1.79, -1.68, -1.73, -0.10, -0.09],
-    up = [ 0.33, -0.35,  2.59, -0.15,  0.59, -1.41, -0.27],
-    side = [  1.832,  -0.332,   1.011,  -1.437,   1.1  ,  -2.106,  3.074]
-)
-def mirror_arm_joints(x):
-    "mirror image of joints (r->l or l->r)"
-    return np.r_[-x[0],x[1],-x[2],x[3],-x[4],x[5],-x[6]]
+L_POSTURES = {'side': np.array([[-0.98108876, -0.1846131 ,  0.0581623 ,  0.10118172],
+                                [-0.19076337,  0.97311662, -0.12904799,  0.68224057],
+                                [-0.03277475, -0.13770277, -0.98993119,  0.91652485],
+                                [ 0.        ,  0.        ,  0.        ,  1.        ]]) }
+
+R_POSTURES = {'side' : np.array([[-0.98108876,  0.1846131 ,  0.0581623 ,  0.10118172],
+                                 [ 0.19076337,  0.97311662,  0.12904799, -0.68224057],
+                                 [-0.03277475,  0.13770277, -0.98993119,  0.91652485],
+                                 [ 0.        ,  0.        ,  0.        ,  1.        ]]) }
+
+
 
 def reset_arms_to_side():
-    Globals.robot.SetDOFValues(PR2_L_POSTURES["side"],
-                               Globals.robot.GetManipulator("leftarm").GetArmIndices())
-    Globals.robot.SetDOFValues(mirror_arm_joints(PR2_L_POSTURES["side"]),
-                               Globals.robot.GetManipulator("rightarm").GetArmIndices())
+    Globals.sim.grippers['r'].set_toolframe_transform(R_POSTURES['side'])
+    Globals.sim.grippers['l'].set_toolframe_transform(L_POSTURES['side'])
 
 ###################
 
@@ -637,14 +504,13 @@ if __name__ == "__main__":
 
     Globals.env = openravepy.Environment()
     Globals.env.StopSimulation()
-    Globals.env.Load("robots/pr2-beta-static.zae")
-    Globals.robot = Globals.env.GetRobots()[0]
+    Globals.sim = ropesim_floating.FloatingGripperSimulation(Globals.env)
 
     actionfile = h5py.File(args.actionfile, 'r')
     fakedatafile = h5py.File(args.fakedatafile, 'r')
     Globals.init_tfm = fakedatafile['init_tfm'][()]
     
-    init_rope_xyz, _ = load_fake_data_segment(fakedatafile, args.fake_data_segment, args.fake_data_transform) # this also sets the torso (torso_lift_joint) to the height in the data
+    init_rope_xyz = load_fake_data_segment(fakedatafile, args.fake_data_segment, args.fake_data_transform) # this also sets the torso (torso_lift_joint) to the height in the data
 
     # Set table height to correct height of first rope in holdout set
     holdoutfile = h5py.File(args.holdoutfile, 'r')
@@ -654,7 +520,6 @@ if __name__ == "__main__":
     table_height = init_rope_xyz[:,2].mean() - .02
     table_xml = make_table_xml(translation=[1, 0, table_height], extents=[.85, .55, .01])
     Globals.env.LoadData(table_xml)
-    Globals.sim = ropesim.Simulation(Globals.env, Globals.robot)
     # create rope from rope in data
     rope_nodes = rope_initialization.find_path_through_point_cloud(init_rope_xyz)
     Globals.sim.create(rope_nodes)
@@ -752,7 +617,7 @@ if __name__ == "__main__":
                 for (q, a, tf, r_a) in agenda:
                     set_rope_transforms(tf)                 
                     cur_xyz = Globals.sim.observe_cloud()
-                    success, bodypart2trajs = simulate_demo(cur_xyz, actionfile[a], animate=False)
+                    success, ee_trajs = simulate_demo(cur_xyz, actionfile[a], animate=False)
                     if args.animation:
                         Globals.viewer.Step()
                     result_cloud = Globals.sim.observe_cloud()
@@ -795,8 +660,8 @@ if __name__ == "__main__":
                 trajs_g = result_file[i_task][str(i_step)].create_group('trajs')
                 for (i_traj,traj) in enumerate(trajs):
                     traj_g = trajs_g.create_group(str(i_traj))
-                    for (bodypart, bodyparttraj) in traj.iteritems():
-                        traj_g[str(bodypart)] = bodyparttraj
+                    for (ee_name, ee_traj) in traj.iteritems():
+                        traj_g[str(ee_name)] = ee_traj
                 result_file[i_task][str(i_step)]['values'] = q_values_root
         if save_results:
             result_file.close()
