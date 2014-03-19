@@ -118,9 +118,9 @@ def set_gripper_sim(lr, is_open, prev_is_open):
     for val in joint_traj:
         Globals.sim.grippers[lr].set_gripper_joint_value(val)
         Globals.sim.step()
-#        if Globals.viewer:
-#            Globals.viewer.Step()
-#            if args.interactive: Globals.viewer.Idle()
+        #if Globals.viewer:
+        #    Globals.viewer.Step()
+        #    if args.interactive: Globals.viewer.Idle()
     # add constraints if necessary
     if not is_open and prev_is_open:
         if not Globals.sim.grab_rope(lr):
@@ -514,8 +514,10 @@ if __name__ == "__main__":
 
     # Set table height to correct height of first rope in holdout set
     holdoutfile = h5py.File(args.holdoutfile, 'r')
-    init_rope_xyz = holdoutfile[holdoutfile.keys()[0]]['rope_nodes'][:]
-    init_rope_xyz = init_rope_xyz.dot(Globals.init_tfm[:3,:3].T) + Globals.init_tfm[:3,3][None,:]
+    first_holdout = holdoutfile[holdoutfile.keys()[0]]
+    init_rope_xyz = first_holdout['rope_nodes'][:]
+    if 'frame' not in first_holdout or first_holdout['frame'][()] != 'r':
+        init_rope_xyz = init_rope_xyz.dot(Globals.init_tfm[:3,:3].T) + Globals.init_tfm[:3,3][None,:]
 
     table_height = init_rope_xyz[:,2].mean() - .02
     table_xml = make_table_xml(translation=[1, 0, table_height], extents=[.85, .55, .01])
@@ -569,7 +571,9 @@ if __name__ == "__main__":
         redprint("Replace rope")
         rope_xyz = demo_id_rope_nodes["rope_nodes"][:]
         # Transform rope_nodes from the kinect's frame into the frame of the PR2
-        rope_xyz = rope_xyz.dot(Globals.init_tfm[:3,:3].T) + Globals.init_tfm[:3,3][None,:]
+        if 'frame' not in demo_id_rope_nodes or demo_id_rope_nodes['frame'][()] != 'r':
+            redprint("Transforming rope into frame of robot")
+            rope_xyz = rope_xyz.dot(Globals.init_tfm[:3,:3].T) + Globals.init_tfm[:3,3][None,:]
         rope_nodes = rope_initialization.find_path_through_point_cloud(rope_xyz)
 
         # TODO: Remove after debugging
