@@ -106,9 +106,9 @@ def get_old_joint_traj_ik(sim_env, ee_hmats, prev_vals, i_start, i_end):
 
                 old_joint_traj.append(sols[min_index])
 
-                blueprint("Openrave IK succeeds")
-            else:
-                redprint("Openrave IK fails")
+                #blueprint("Openrave IK succeeds")
+            #else:
+                #redprint("Openrave IK fails")
 
         if len(x) == 0:
             if prev_vals[lr] is not None:
@@ -394,7 +394,9 @@ def eval_on_holdout(args, sim_env):
         redprint("Replace rope")
         rope_xyz = demo_id_rope_nodes["rope_nodes"][:]
         # Transform rope_nodes from the kinect's frame into the frame of the PR2
-        rope_xyz = rope_xyz.dot(GlobalVars.init_tfm[:3,:3].T) + GlobalVars.init_tfm[:3,3][None,:]
+        if 'frame' not in demo_id_rope_nodes or demo_id_rope_nodes['frame'][()] != 'r':
+            redprint("Transforming rope into frame of robot")
+            rope_xyz = rope_xyz.dot(GlobalVars.init_tfm[:3,:3].T) + GlobalVars.init_tfm[:3,3][None,:]
         rope_nodes = rope_initialization.find_path_through_point_cloud(rope_xyz)
 
         # don't call replace_rope and sim.settle() directly. use time machine interface for deterministic results!
@@ -553,12 +555,15 @@ def load_simulation(args, sim_env):
     
     # Set table height to correct height of first rope in holdout set
     holdoutfile = h5py.File(args.holdoutfile, 'r')
-    init_rope_xyz = holdoutfile[holdoutfile.keys()[0]]['rope_nodes'][:]
-    init_rope_xyz = init_rope_xyz.dot(GlobalVars.init_tfm[:3,:3].T) + GlobalVars.init_tfm[:3,3][None,:]
+    first_holdout = holdoutfile[holdoutfile.keys()[0]]
+    init_rope_xyz = first_holdout['rope_nodes'][:]
+    if 'frame' not in first_holdout or first_holdout['frame'][()] != 'r':
+        init_rope_xyz = init_rope_xyz.dot(GlobalVars.init_tfm[:3,:3].T) + GlobalVars.init_tfm[:3,3][None,:]
 
-    table_height = init_rope_xyz[:,2].mean() - .02
+    table_height = init_rope_xyz[:,2].mean() - .02  # Before: .02
     table_xml = sim_util.make_table_xml(translation=[1, 0, table_height], extents=[.85, .55, .01])
     sim_env.env.LoadData(table_xml)
+
     if 'bookshelve' in args.obstacles:
         sim_env.env.Load("data/bookshelves.env.xml")
     if 'boxes' in args.obstacles:

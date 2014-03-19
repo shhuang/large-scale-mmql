@@ -153,6 +153,8 @@ def load_task_results_step(fname, sim_env, task_index, step_index):
     result_file = h5py.File(fname, 'r')
     task_index = str(task_index)
     step_index = str(step_index)
+    import IPython as ipy
+    ipy.embed()
     best_action = result_file[task_index][step_index]['best_action'][()]
     full_trajs_g = result_file[task_index][step_index]['full_trajs']
     full_trajs = []
