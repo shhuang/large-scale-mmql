@@ -298,7 +298,7 @@ def simulate_demo_traj(sim_env, new_xyz, seg_info, full_trajs, ignore_infeasibil
         sim_env.viewer.Step()
     
     return success, feasible, misgrasp, full_trajs
-
+    
 def q_value_fn(state, action, fn, weights, w0):
     return np.dot(weights, fn(state, action)) + w0
 
