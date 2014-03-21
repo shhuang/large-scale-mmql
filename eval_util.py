@@ -63,7 +63,7 @@ def load_task_results_init(fname, task_index):
     rots = result_file[task_index]['init']['rots'][()]
     return rope_nodes, rope_params, trans, rots
 
-def save_task_results_step(fname, sim_env, task_index, step_index, eval_stats, best_root_action, full_trajs, q_values_root):
+def save_task_results_step(fname, sim_env, task_index, step_index, eval_stats, best_root_action, full_trajs, q_values_root, floating=False):
     if fname is None:
         return
     result_file = h5py.File(fname, 'a')
@@ -80,14 +80,23 @@ def save_task_results_step(fname, sim_env, task_index, step_index, eval_stats, b
     result_file[task_index][step_index]['trans'] = trans
     result_file[task_index][step_index]['rots'] = rots
     result_file[task_index][step_index]['best_action'] = str(best_root_action)
-    full_trajs_g = result_file[task_index][step_index].create_group('full_trajs')
-    for (i_traj, (traj, dof_inds)) in enumerate(full_trajs):
-        full_traj_g = full_trajs_g.create_group(str(i_traj))
-        # current version of h5py can't handle empty arrays, so don't save them if they are empty
-        if np.all(traj.shape):
-            full_traj_g['traj'] = traj
-        if len(dof_inds) > 0:
-            full_traj_g['dof_inds'] = dof_inds
+    if not floating:
+        full_trajs_g = result_file[task_index][step_index].create_group('full_trajs')
+        for (i_traj, (traj, dof_inds)) in enumerate(full_trajs):
+            full_traj_g = full_trajs_g.create_group(str(i_traj))
+            # current version of h5py can't handle empty arrays, so don't save them if they are empty
+            if np.all(traj.shape):
+                full_traj_g['traj'] = traj
+            if len(dof_inds) > 0:
+                full_traj_g['dof_inds'] = dof_inds
+    else:
+        gripper_trajs_g = result_file[task_index][step_index].create_group('gripper_trajs')
+        for (i_traj, gripper_traj) in enumerate(full_trajs):
+            gripper_traj_g = gripper_trajs_g.create_group(str(i_traj))
+            # Make numpy array from a list of numpy arrays (hmats)
+            # (go the other direction by calling list() on the resulting numpy array)
+            gripper_traj_g['l_hmats'] = np.asarray(gripper_traj['l'])
+            gripper_traj_g['r_hmats'] = np.asarray(gripper_traj['r'])
     result_file[task_index][step_index]['values'] = q_values_root
     result_file[task_index][step_index]['action_time'] = eval_stats.action_elapsed_time
     result_file[task_index][step_index]['exec_time'] = eval_stats.exec_elapsed_time
@@ -147,7 +156,8 @@ def save_task_follow_traj_output(fname, task_index, step_index, choice_index, mi
     result_file.close()
 
 # TODO make the return values more consistent
-def load_task_results_step(fname, sim_env, task_index, step_index):
+# TODO Add loading for floating grippers
+def load_task_results_step(fname, sim_env, task_index, step_index, floating=False):
     if fname is None:
         raise RuntimeError("Cannot load task results with an unspecified file name")
     result_file = h5py.File(fname, 'r')

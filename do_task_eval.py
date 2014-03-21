@@ -32,13 +32,6 @@ TFM_GTF_EE = np.array([[ 0.,  0.,  1.,  0.],
                        [-1.,  0.,  0.,  0.],
                        [ 0.,  0.,  0.,  1.]])
 
-L_POSTURES = dict(
-    untucked = [0.4,  1.0,   0.0,  -2.05,  0.0,  -0.1,  0.0],
-    tucked = [0.06, 1.25, 1.79, -1.68, -1.73, -0.10, -0.09],
-    up = [ 0.33, -0.35,  2.59, -0.15,  0.59, -1.41, -0.27],
-    side = [  1.832,  -0.332,   1.011,  -1.437,   1.1  ,  -2.106,  3.074]
-)
-
 GRIPPER_ANGLE_THRESHOLD = 10.0 # Open/close threshold, adjusted for human demonstrations
 
 class GlobalVars:
@@ -98,7 +91,7 @@ def get_old_joint_traj_ik(sim_env, ee_hmats, prev_vals, i_start, i_end):
                     if prev_vals[lr] is not None:
                         reference_sol = prev_vals[lr]
                     else:
-                        reference_sol = L_POSTURES['side'] if lr == 'l' else sim_util.mirror_arm_joints(L_POSTURES['side'])
+                        reference_sol = sim_util.PR2_L_POSTURES['side'] if lr == 'l' else sim_util.mirror_arm_joints(sim_util.PR2_L_POSTURES['side'])
                 
                 sols = [sim_util.closer_angs(sol, reference_sol) for sol in sols]
                 norm_differences = [norm(np.asarray(reference_sol) - np.asarray(sol), 2) for sol in sols]
@@ -114,7 +107,7 @@ def get_old_joint_traj_ik(sim_env, ee_hmats, prev_vals, i_start, i_end):
             if prev_vals[lr] is not None:
                 vals = prev_vals[lr]
             else:
-                vals = L_POSTURES['side'] if lr == 'l' else sim_util.mirror_arm_joints(L_POSTURES['side'])
+                vals = sim_util.PR2_L_POSTURES['side'] if lr == 'l' else sim_util.mirror_arm_joints(sim_util.PR2_L_POSTURES['side'])
 
             old_joint_traj_interp = np.tile(vals,(i_end+1-i_start, 1))
         else:
@@ -152,7 +145,7 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
         handles.append(sim_env.env.plot3(new_xyz,5, (0,0,1)))
         handles.append(sim_env.env.plot3(old_xyz_warped,5, (0,1,0)))
 
-    miniseg_starts, miniseg_ends = sim_util.split_trajectory_by_gripper(seg_info, GRIPPER_ANGLE_THRESHOLD)    
+    miniseg_starts, miniseg_ends, _ = sim_util.split_trajectory_by_gripper(seg_info, thresh = GRIPPER_ANGLE_THRESHOLD)    
     success = True
     feasible = True
     misgrasp = False
@@ -243,7 +236,6 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
     sim_util.reset_arms_to_side(sim_env)
     if animate:
         sim_env.viewer.Step()
-    
     return success, feasible, misgrasp, full_trajs
 
 def simulate_demo_traj(sim_env, new_xyz, seg_info, full_trajs, ignore_infeasibility=True, animate=False, interactive=False):
@@ -258,7 +250,7 @@ def simulate_demo_traj(sim_env, new_xyz, seg_info, full_trajs, ignore_infeasibil
         handles.append(sim_env.env.plot3(old_xyz,5, (1,0,0)))
         handles.append(sim_env.env.plot3(new_xyz,5, (0,0,1)))
 
-    miniseg_starts, miniseg_ends = sim_util.split_trajectory_by_gripper(seg_info, GRIPPER_ANGLE_THRESHOLD)    
+    miniseg_starts, miniseg_ends, _ = sim_util.split_trajectory_by_gripper(seg_info, thresh = GRIPPER_ANGLE_THRESHOLD)    
     success = True
     feasible = True
     misgrasp = False

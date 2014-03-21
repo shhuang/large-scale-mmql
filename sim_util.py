@@ -10,6 +10,7 @@ from numpy import asarray
 import re
 
 from rapprentice import animate_traj, ropesim, ros2rave, math_utils as mu
+import ropesim_floating
 
 PR2_L_POSTURES = dict(
     untucked = [0.4,  1.0,   0.0,  -2.05,  0.0,  -0.1,  0.0],
@@ -17,6 +18,16 @@ PR2_L_POSTURES = dict(
     up = [ 0.33, -0.35,  2.59, -0.15,  0.59, -1.41, -0.27],
     side = [  1.832,  -0.332,   1.011,  -1.437,   1.1  ,  -2.106,  3.074]
 )
+
+L_POSTURES = {'side': np.array([[-0.98108876, -0.1846131 ,  0.0581623 ,  0.10118172],
+                                [-0.19076337,  0.97311662, -0.12904799,  0.68224057],
+                                [-0.03277475, -0.13770277, -0.98993119,  0.91652485],
+                                [ 0.        ,  0.        ,  0.        ,  1.        ]]) }
+
+R_POSTURES = {'side' : np.array([[-0.98108876,  0.1846131 ,  0.0581623 ,  0.10118172],
+                                 [ 0.19076337,  0.97311662,  0.12904799, -0.68224057],
+                                 [-0.03277475,  0.13770277, -0.98993119,  0.91652485],
+                                 [ 0.        ,  0.        ,  0.        ,  1.        ]]) }
 
 class SimulationEnv:
     def __init__(self):
@@ -75,24 +86,36 @@ def make_cylinder_xml(name, translation, radius, height):
 """ % (name, name, translation[0], translation[1], translation[2], radius, height)
     return xml
 
-def reset_arms_to_side(sim_env):
-    sim_env.robot.SetDOFValues(PR2_L_POSTURES["side"],
-                               sim_env.robot.GetManipulator("leftarm").GetArmIndices())
-    #actionfile = None
-    sim_env.robot.SetDOFValues(mirror_arm_joints(PR2_L_POSTURES["side"]),
-                               sim_env.robot.GetManipulator("rightarm").GetArmIndices())
-    mult = 5
-    open_angle = .08 * mult
-    for lr in 'lr':
-        joint_ind = sim_env.robot.GetJoint("%s_gripper_l_finger_joint"%lr).GetDOFIndex()
-        start_val = sim_env.robot.GetDOFValues([joint_ind])[0]
-        sim_env.robot.SetDOFValues([open_angle], [joint_ind])
+def reset_arms_to_side(sim_env, floating=False):
+    print "RESET_ARMS_TO_SIDE, floating:", floating
+    if not floating:
+        sim_env.robot.SetDOFValues(PR2_L_POSTURES["side"],
+                                   sim_env.robot.GetManipulator("leftarm").GetArmIndices())
+        #actionfile = None
+        sim_env.robot.SetDOFValues(mirror_arm_joints(PR2_L_POSTURES["side"]),
+                                   sim_env.robot.GetManipulator("rightarm").GetArmIndices())
+        mult = 5
+        open_angle = .08 * mult
+        for lr in 'lr':
+            joint_ind = sim_env.robot.GetJoint("%s_gripper_l_finger_joint"%lr).GetDOFIndex()
+            start_val = sim_env.robot.GetDOFValues([joint_ind])[0]
+            sim_env.robot.SetDOFValues([open_angle], [joint_ind])
+    else:
+        if sim_env.sim:
+            sim_env.sim.grippers['r'].set_toolframe_transform(R_POSTURES['side'])
+            sim_env.sim.grippers['l'].set_toolframe_transform(L_POSTURES['side'])
 
-def arm_moved(joint_traj):    
-    if len(joint_traj) < 2: return False
-    return ((joint_traj[1:] - joint_traj[:-1]).ptp(axis=0) > .01).any()
+def arm_moved(joint_traj, floating=False):
+    if not floating:
+        if len(joint_traj) < 2: return False
+        return ((joint_traj[1:] - joint_traj[:-1]).ptp(axis=0) > .01).any()
+    else:
+        if len(hmat_traj) < 2:
+            return False
+        tts = hmat_traj[:,:3,3]
+        return ((tts[1:] - tts[:-1]).ptp(axis=0) > .01).any()
 
-def split_trajectory_by_gripper(seg_info, thresh = .04):
+def split_trajectory_by_gripper(seg_info, thresh = .04, ms_thresh = 2):
     # thresh: open/close threshold
     rgrip = asarray(seg_info["r_gripper_joint"])
     lgrip = asarray(seg_info["l_gripper_joint"])
@@ -111,12 +134,26 @@ def split_trajectory_by_gripper(seg_info, thresh = .04):
     seg_starts = np.unique(np.r_[0, after_transitions])
     seg_ends = np.unique(np.r_[before_transitions, n_steps-1])
 
-    return seg_starts, seg_ends
+    # Only count gripper open/closes if the number of time steps is greater
+    # than ms_thresh
+    lr_open = {lr:[] for lr in 'lr'}
+    new_seg_starts = []
+    new_seg_ends = []
+    for i in range(len(seg_starts)):
+        if seg_ends[i]- seg_starts[i] >= ms_thresh:
+            new_seg_starts.append(seg_starts[i])
+            new_seg_ends.append(seg_ends[i])
+            lval = True if lgrip[seg_starts[i]] >= thresh else False
+            lr_open['l'].append(lval)
+            rval = True if rgrip[seg_starts[i]] >= thresh else False
+            lr_open['r'].append(rval)
+
+    return new_seg_starts, new_seg_ends, lr_open
 
 def binarize_gripper(angle, thresh = .04):
     return angle > thresh
     
-def set_gripper_maybesim(sim_env, lr, is_open, prev_is_open):
+def set_gripper_maybesim(sim_env, lr, is_open, prev_is_open, floating=False):
     mult = 5
     open_angle = .08 * mult
     closed_angle = .02 * mult
@@ -129,15 +166,23 @@ def set_gripper_maybesim(sim_env, lr, is_open, prev_is_open):
         print "DONE RELEASING"
 
     # execute gripper open/close trajectory
-    joint_ind = sim_env.robot.GetJoint("%s_gripper_l_finger_joint"%lr).GetDOFIndex()
-    start_val = sim_env.robot.GetDOFValues([joint_ind])[0]
+    if not floating:
+        joint_ind = sim_env.robot.GetJoint("%s_gripper_l_finger_joint"%lr).GetDOFIndex()
+        start_val = sim_env.robot.GetDOFValues([joint_ind])[0]
+    else:
+        start_val = sim_env.sim.grippers[lr].get_gripper_joint_value()
+
     joint_traj = np.linspace(start_val, target_val, np.ceil(abs(target_val - start_val) / .02))
     for val in joint_traj:
-        sim_env.robot.SetDOFValues([val], [joint_ind])
+        if not floating:
+            sim_env.robot.SetDOFValues([val], [joint_ind])
+        else:
+            sim_env.sim.grippers[lr].set_gripper_joint_value(val)
         sim_env.sim.step()
-#         if args.animation:
-#                sim_env.viewer.Step()
-#             if args.interactive: sim_env.viewer.Idle()
+        #if args.animation:
+            #sim_env.viewer.Step()
+            #if args.interactive: sim_env.viewer.Idle()
+
     # add constraints if necessary
     if sim_env.viewer:
         sim_env.viewer.Step()
@@ -217,6 +262,36 @@ def unwrap_in_place(t):
     else:
         raise NotImplementedError
 
+# Used for floating grippers
+def animate_floating_traj(sim_env, lhmats, rhmats, pause=True, step_viewer=True, callback=None,step=5):
+    assert len(lhmats)==len(rhmats), "I don't know how to animate trajectory with different lengths"
+    if step_viewer or pause: viewer = trajoptpy.GetViewer(sim_env.sim.env)
+    for i in xrange(len(lhmats)):
+        if callback is not None: callback(i)
+        sim_env.sim.grippers['r'].set_toolframe_transform(rhmats[i])
+        sim_env.sim.grippers['l'].set_toolframe_transform(lhmats[i])
+        if pause: viewer.Idle()
+        elif step_viewer and not i%step: viewer.Step()
+
+# Used for floating grippers
+def exec_traj_sim(sim_env, lr_traj, animate=False, interactive=False, step=1):
+    def sim_callback(i):
+        sim_env.sim.step()
+
+    lhmats_up, rhmats_up = ropesim_floating.retime_hmats(lr_traj['l'], lr_traj['r'])
+
+    # in simulation mode, we must make sure to gradually move to the new starting position
+    curr_rtf  = sim_env.sim.grippers['r'].get_toolframe_transform()
+    curr_ltf  = sim_env.sim.grippers['l'].get_toolframe_transform()
+
+    l_transition_hmats, r_transition_hmats = ropesim_floating.retime_hmats([curr_ltf, lhmats_up[0]], [curr_rtf, rhmats_up[0]])
+
+    animate_floating_traj(sim_env, l_transition_hmats, r_transition_hmats, pause=False,
+                          callback=sim_callback, step_viewer=animate, step=step)
+    animate_floating_traj(sim_env, lhmats_up, rhmats_up, pause=False,
+                          callback=sim_callback, step_viewer=animate, step=step)
+    return True
+
 def sim_traj_maybesim(sim_env, bodypart2traj, animate=False, interactive=False):
     full_traj = getFullTraj(sim_env, bodypart2traj)
     return sim_full_traj_maybesim(sim_env, full_traj, animate=animate, interactive=interactive)
@@ -270,15 +345,17 @@ def load_random_start_segment(demofile):
     seg_name = random.choice(start_keys)
     return demofile[seg_name]['cloud_xyz']
 
-def load_fake_data_segment(sim_env, demofile, fake_data_segment, fake_data_transform, set_robot_state=True):
+def load_fake_data_segment(sim_env, demofile, fake_data_segment, fake_data_transform, set_robot_state=True, floating=False):
     fake_seg = demofile[fake_data_segment]
     new_xyz = np.squeeze(fake_seg["cloud_xyz"])
     hmat = openravepy.matrixFromAxisAngle(fake_data_transform[3:6])
     hmat[:3,3] = fake_data_transform[0:3]
     new_xyz = new_xyz.dot(hmat[:3,:3].T) + hmat[:3,3][None,:]
-    r2r = ros2rave.RosToRave(sim_env.robot, asarray(fake_seg["joint_states"]["name"]))
-    if set_robot_state:
-        r2r.set_values(sim_env.robot, asarray(fake_seg["joint_states"]["position"][0]))
+    r2r = None
+    if not floating:
+        r2r = ros2rave.RosToRave(sim_env.robot, asarray(fake_seg["joint_states"]["name"]))
+        if set_robot_state:
+            r2r.set_values(sim_env.robot, asarray(fake_seg["joint_states"]["position"][0]))
     return new_xyz, r2r
 
 def unif_resample(traj, max_diff, wt = None):        
@@ -315,17 +392,27 @@ def unif_resample(traj, max_diff, wt = None):
 def get_rope_transforms(sim_env):
     return (sim_env.sim.rope.GetTranslations(), sim_env.sim.rope.GetRotations())    
 
-def replace_rope(new_rope, sim_env, rope_params=None):
+def replace_rope(new_rope, sim_env, floating=False, rope_params=None):
     if sim_env.sim:
         for lr in 'lr':
             sim_env.sim.release_rope(lr)
     rope_kin_body = sim_env.env.GetKinBody('rope')
-    if rope_kin_body:
-        if sim_env.viewer:
-            sim_env.viewer.RemoveKinBody(rope_kin_body)
-    if sim_env.sim:
-        del sim_env.sim
-    sim_env.sim = ropesim.Simulation(sim_env.env, sim_env.robot, rope_params)
+    if rope_kin_body and sim_env.viewer:
+        sim_env.viewer.RemoveKinBody(rope_kin_body)
+
+    if floating and rope_kin_body and sim_env.env:
+        sim_env.env.Remove(rope_kin_body)
+    if floating and sim_env.sim and sim_env.sim.bt_env:
+        sim_env.sim.bt_env.Remove(sim_env.sim.bt_env.GetObjectByName('rope'))
+
+    if not floating:
+        if sim_env.sim:
+            del sim_env.sim
+        sim_env.sim = ropesim.Simulation(sim_env.env, sim_env.robot, rope_params)
+    else:
+        if not sim_env.sim:
+            sim_env.sim = ropesim_floating.FloatingGripperSimulation(sim_env.env)
+
     sim_env.sim.create(new_rope)
 
 def set_rope_transforms(tfs, sim_env):
@@ -371,13 +458,14 @@ class RopeSimTimeMachine(object):
     time_machine.restore_from_checkpoint(id) should restore the same simulation
     state everytime it is called)
     """
-    def __init__(self, new_rope, sim_env, rope_params=None):
+    def __init__(self, new_rope, sim_env, floating=False, rope_params=None):
         """
         new_rope is the initial rope_nodes of the machine for a particular task
         """
         self.rope_nodes = new_rope
         self.checkpoints = {}
-        replace_rope(self.rope_nodes, sim_env, rope_params)
+        self.floating = floating
+        replace_rope(self.rope_nodes, sim_env, floating=self.floating, rope_params=rope_params)
         sim_env.sim.settle()
         
     def set_checkpoint(self, id, sim_env, tfs=None):
@@ -391,7 +479,7 @@ class RopeSimTimeMachine(object):
     def restore_from_checkpoint(self, id, sim_env, rope_params=None):
         if id not in self.checkpoints:
             raise RuntimeError("Can not restore checkpoint with id %s since it has not been set"%id)
-        replace_rope(self.rope_nodes, sim_env, rope_params)
+        replace_rope(self.rope_nodes, sim_env, floating=self.floating, rope_params=rope_params)
         set_rope_transforms(self.checkpoints[id], sim_env)
         sim_env.sim.settle()
 
