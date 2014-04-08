@@ -11,7 +11,7 @@ import pdb, time
 
 import trajoptpy, openravepy
 from rope_qlearn import select_feature_fn, warp_hmats, registration_cost, \
-        registration
+        registration, get_closing_pts
 from knot_classifier import isKnot as is_knot
 import ropesim_floating
 import os, os.path, numpy as np, h5py
@@ -46,6 +46,7 @@ class GlobalVars:
     actions = None
     gripper_weighting = False
     init_tfm = None
+    table_height = 0.
 
 def get_ds_cloud(sim_env, action):
     return clouds.downsample(GlobalVars.actions[action]['cloud_xyz'], DS_SIZE)
@@ -77,7 +78,7 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
     old_xyz = np.squeeze(seg_info["cloud_xyz"])
     old_xyz = clouds.downsample(old_xyz, DS_SIZE)
     new_xyz = clouds.downsample(new_xyz, DS_SIZE)
-    
+            
     link_names = ["%s_gripper_tool_frame"%lr for lr in ('lr')]
     hmat_list = [(lr, seg_info[ln]['hmat']) for lr, ln in zip('lr', link_names)]
     if GlobalVars.gripper_weighting:
@@ -85,12 +86,21 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
     else:
         interest_pts = None
     lr2eetraj, _, old_xyz_warped = warp_hmats_tfm(old_xyz, new_xyz, hmat_list, interest_pts)
+    
 
     handles = []
     if animate:
         handles.append(sim_env.env.plot3(old_xyz,5, (1,0,0)))
         handles.append(sim_env.env.plot3(new_xyz,5, (0,0,1)))
         handles.append(sim_env.env.plot3(old_xyz_warped,5, (0,1,0)))
+        
+    for lr in 'lr':
+        handles.append(sim_env.env.drawlinestrip(lr2eetraj[lr][:,:3,3], 2, (0,1,0,1)))
+        
+    for k, hmats in hmat_list:
+        hmats_tfm = np.asarray([GlobalVars.init_tfm.dot(h) for h in hmats])
+        handles.append(sim_env.env.drawlinestrip(hmats_tfm[:,:3,3], 2, (1,0,0,1)))
+        
 
     miniseg_starts, miniseg_ends, lr_open = sim_util.split_trajectory_by_gripper(seg_info, thresh=GRIPPER_ANGLE_THRESHOLD)    
     success = True
@@ -105,14 +115,37 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
         ################################    
         redprint("Generating joint trajectory for part %i"%(i_miniseg))
 
+
+        ### adaptive resampling based on xyz in end_effector
+        end_trans_trajs = np.zeros([i_end+1-i_start, 6])
+
+        for lr in 'lr':
+            for i in xrange(i_start,i_end+1):
+                if lr == 'l':
+                    end_trans_trajs[i-i_start, :3] = lr2eetraj[lr][i][:3,3]
+                else:
+                    end_trans_trajs[i-i_start, 3:] = lr2eetraj[lr][i][:3,3]
+
+        if True:
+            adaptive_times, end_trans_trajs = resampling.adaptive_resample2(end_trans_trajs, 0.01)
+        else:
+            adaptive_times = range(len(end_trans_trajs))
+            
+
         miniseg_traj = {}
         for lr in 'lr':
-            ee_hmats = resampling.interp_hmats(np.arange(i_end+1-i_start), np.arange(i_end+1-i_start), lr2eetraj[lr][i_start:i_end+1])
+            #ee_hmats = resampling.interp_hmats(np.arange(i_end+1-i_start), np.arange(i_end+1-i_start), lr2eetraj[lr][i_start:i_end+1])
+            ee_hmats = resampling.interp_hmats(adaptive_times, np.arange(i_end+1-i_start), lr2eetraj[lr][i_start:i_end+1])
             # if arm_moved(ee_hmats, floating=True):
             if True:
                 miniseg_traj[lr] = ee_hmats;
                 
         miniseg_trajs.append(miniseg_traj);
+        
+        for miniseg_traj in miniseg_trajs:
+            for lr in 'lr':
+                hmats = np.asarray(miniseg_traj[lr])
+                handles.append(sim_env.env.drawlinestrip(hmats[:,:3,3], 2, (0,0,1,1)))
 
         redprint("Executing joint trajectory for part %i using arms '%s'"%(i_miniseg, miniseg_traj.keys()))
         
@@ -204,6 +237,11 @@ def parse_input_args():
     parser_replay = subparsers.add_parser('replay')
     parser_replay.add_argument("loadresultfile", type=str)
     parser_replay.add_argument("--replay_rope_params", type=str, default=None, help="if not specified, uses the rope_params that is saved in the result file")
+    
+    parser_replay = subparsers.add_parser('playback')
+    parser_replay.add_argument("--exec_rope_params", type=str, default='default')
+
+
 
     return parser.parse_args()
 
@@ -239,6 +277,7 @@ def eval_on_holdout(args, sim_env):
         rope_nodes = rope_initialization.find_path_through_point_cloud(rope_xyz)
 
         # don't call replace_rope and sim.settle() directly. use time machine interface for deterministic results!
+        
         time_machine = sim_util.RopeSimTimeMachine(rope_nodes, sim_env, floating=True)
 
         if args.animation:
@@ -318,6 +357,64 @@ def eval_on_holdout(args, sim_env):
         num_total += 1
 
         redprint('Eval Successes / Total: ' + str(num_successes) + '/' + str(num_total))
+        
+        
+        
+        
+def eval_demo_playback(args, sim_env):
+    actionfile = GlobalVars.actions
+    num_successes = 0
+    num_total = 0
+    
+    
+    actions_names = []
+    for action_name in actionfile:
+        actions_names.append(action_name)
+        
+    i = 0
+    i_task = 0
+    i_step = 0
+    while i < len(actions_names):
+        (demo_name, seg_name) = actions_names[i].split('-')
+        
+        if seg_name == 'seg00':
+            if i > 0:
+                if is_knot(sim_env.sim.rope.GetControlPoints()):
+                    redprint("KNOT TIED!")
+                    num_successes += 1
+                num_total += 1
+            
+            i_task += 1
+            i_step = 0
+            print "task %s" % demo_name
+            sim_util.reset_arms_to_side(sim_env, floating=True)
+            redprint("Replace rope")
+            rope_xyz = np.asarray(actionfile[actions_names[i]]['cloud_xyz'])
+            #rope_xyz = rope_xyz.dot(GlobalVars.init_tfm[:3,:3].T) + GlobalVars.init_tfm[:3,3][None,:]
+            rope_nodes = rope_initialization.find_path_through_point_cloud(rope_xyz)
+            
+            # don't call replace_rope and sim.settle() directly. use time machine interface for deterministic results!
+            time_machine = sim_util.RopeSimTimeMachine(rope_nodes, sim_env, rope_params=sim_util.get_rope_params("thick"), floating=True)
+        
+            if args.animation:
+                sim_env.viewer.Step()
+                    
+        print "task %s step %i" % (i_task, i_step)
+        sim_util.reset_arms_to_side(sim_env, floating=True)
+            
+        redprint("Observe point cloud")
+        new_xyz = sim_env.sim.observe_cloud()
+        state = ("eval_%i"%get_unique_id(), new_xyz) 
+        
+        action = actions_names[i]
+        
+        eval_stats = eval_util.EvalStats()
+        eval_stats.success, eval_stats.feasible, eval_stats.misgrasp, full_trajs = \
+        compute_trans_traj(sim_env, new_xyz, GlobalVars.actions[action], animate=args.animation, interactive=args.interactive)
+                        
+        i += 1
+
+    redprint('Eval Successes / Total: ' + str(num_successes) + '/' + str(num_total))        
 
 # make args more module (i.e. remove irrelevant args for replay mode)
 # TODO: Make this work with floating grippers
@@ -399,6 +496,7 @@ def load_simulation(args, sim_env):
         init_rope_xyz = init_rope_xyz.dot(GlobalVars.init_tfm[:3,:3].T) + GlobalVars.init_tfm[:3,3][None,:]
 
     table_height = init_rope_xyz[:,2].mean() - .02  # Before: .02
+    GlobalVars.table_height = table_height
     table_xml = sim_util.make_table_xml(translation=[1, 0, table_height], extents=[.85, .55, .01])
     sim_env.env.LoadData(table_xml)
 
@@ -406,6 +504,8 @@ def load_simulation(args, sim_env):
     
     if args.animation:
         sim_env.viewer = trajoptpy.GetViewer(sim_env.env)
+        table = sim_env.env.GetKinBody('table')
+        sim_env.viewer.SetTransparency(table, 0.4)
         if args.animation > 1 and os.path.isfile(args.window_prop_file) and os.path.isfile(args.camera_matrix_file):
             print "loading window and camera properties"
             window_prop = np.loadtxt(args.window_prop_file)
@@ -441,6 +541,8 @@ def main():
         eval_on_holdout(args, sim_env)
     elif args.subparser_name == "replay":
         replay_on_holdout(args, sim_env)
+    elif args.subparser_name == "playback":
+        eval_demo_playback(args, sim_env)
     else:
         raise RuntimeError("Invalid subparser name")
 

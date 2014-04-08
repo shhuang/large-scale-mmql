@@ -86,6 +86,10 @@ def make_cylinder_xml(name, translation, radius, height):
 """ % (name, name, translation[0], translation[1], translation[2], radius, height)
     return xml
 
+def project_point_cloud_z(cloud, height):
+    cloud[:, 2] = height
+    return cloud
+
 def reset_arms_to_side(sim_env, floating=False):
     print "RESET_ARMS_TO_SIDE, floating:", floating
     if not floating:
@@ -429,7 +433,7 @@ def get_rope_params(params_id):
         rope_params.angLimit = .4
         rope_params.linStopErp = .2
     elif params_id == 'thick':
-        rope_params.radius = 0.008
+        rope_params.radius = 0.01
         rope_params.angStiffness = .1
         rope_params.angDamping = 1
         rope_params.linDamping = .75
