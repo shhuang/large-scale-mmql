@@ -130,7 +130,7 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
     old_xyz = np.squeeze(seg_info["cloud_xyz"])
     old_xyz = clouds.downsample(old_xyz, DS_SIZE)
     new_xyz = clouds.downsample(new_xyz, DS_SIZE)
-    
+        
     link_names = ["%s_gripper_tool_frame"%lr for lr in ('lr')]
     hmat_list = [(lr, seg_info[ln]['hmat']) for lr, ln in zip('lr', link_names)]
     if GlobalVars.gripper_weighting:

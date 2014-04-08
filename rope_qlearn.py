@@ -763,10 +763,11 @@ def compute_weights(xyz, interest_pts):
     return 1+distances
 
 def registration_cost(xyz_src, xyz_targ, src_interest_pts=None):
-    if src_interest_pts is not None:
-        weights = compute_weights(xyz_src, src_interest_pts)
-    else:
+    if not src_interest_pts:
         weights = None
+    else:
+        weights = compute_weights(xyz_src, src_interest_pts)
+        
     scaled_xyz_src, src_params = registration.unit_boxify(xyz_src)
     scaled_xyz_targ, targ_params = registration.unit_boxify(xyz_targ)
     f,g = registration.tps_rpm_bij(scaled_xyz_src, scaled_xyz_targ, plot_cb=None,
@@ -835,7 +836,7 @@ def get_closing_inds(seg_info):
     """
     returns a dictionary mapping 'l', 'r' to the index in the corresponding trajectory
     where the gripper first closes
-    """
+    """    
     result = {}
     for lr in 'lr':
         grip = np.asarray(seg_info[lr + '_gripper_joint'])
