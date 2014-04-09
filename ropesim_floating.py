@@ -94,7 +94,7 @@ class FloatingGripper(object):
 
 
 class FloatingGripperSimulation(object):
-    def __init__(self, env):
+    def __init__(self, env, rope_params=None):
         self.env      = env
         self.grippers = None
         self.__init_grippers__()
@@ -102,26 +102,31 @@ class FloatingGripperSimulation(object):
         self.bt_robot = None
         self.rope     = None
         self.constraints = {"l": [], "r": []}
+        
+        
+        if rope_params:
+            self.rope_params = rope_params
+        else:
+            self.rope_params = bulletsimpy.CapsuleRopeParams()
+            #radius: A larger radius means a thicker rope.
+            self.rope_params.radius = 0.005
+            #angStiffness: a rope with a higher angular stifness seems to have more resistance to bending.
+            #orig self.rope_params.angStiffness = .1
+            self.rope_params.angStiffness = .1
+            #A higher angular damping causes the ropes joints to change angle slower.
+            #This can cause the rope to be dragged at an angle by the arm in the air, instead of falling straight.
+            #orig self.rope_params.angDamping = 1
+            self.rope_params.angDamping = 1
+            #orig self.rope_params.linDamping = .75
+            #Not sure what linear damping is, but it seems to limit the linear accelertion of centers of masses.
+            self.rope_params.linDamping = .75
+            #Angular limit seems to be the minimum angle at which the rope joints can bend.
+            #A higher angular limit increases the minimum radius of curvature of the rope.
+            self.rope_params.angLimit = .4
+            #TODO--Find out what the linStopErp is
+            #This could be the tolerance for error when the joint is at or near the joint limit
+            self.rope_params.linStopErp = .2      
 
-        self.rope_params = bulletsimpy.CapsuleRopeParams()
-        #radius: A larger radius means a thicker rope.
-        self.rope_params.radius = 0.005
-        #angStiffness: a rope with a higher angular stifness seems to have more resistance to bending.
-        #orig self.rope_params.angStiffness = .1
-        self.rope_params.angStiffness = .1
-        #A higher angular damping causes the ropes joints to change angle slower.
-        #This can cause the rope to be dragged at an angle by the arm in the air, instead of falling straight.
-        #orig self.rope_params.angDamping = 1
-        self.rope_params.angDamping = 1
-        #orig self.rope_params.linDamping = .75
-        #Not sure what linear damping is, but it seems to limit the linear accelertion of centers of masses.
-        self.rope_params.linDamping = .75
-        #Angular limit seems to be the minimum angle at which the rope joints can bend.
-        #A higher angular limit increases the minimum radius of curvature of the rope.
-        self.rope_params.angLimit = .4
-        #TODO--Find out what the linStopErp is
-        #This could be the tolerance for error when the joint is at or near the joint limit
-        self.rope_params.linStopErp = .2
 
     def __init_grippers__(self):
         """
@@ -138,7 +143,7 @@ class FloatingGripperSimulation(object):
     def create(self, rope_pts):
         bulletsimpy.sim_params.friction = 1
         self.bt_env   = bulletsimpy.BulletEnvironment(self.env, [])
-        self.bt_env.SetGravity([0, 0, -9.8])
+        self.bt_env.SetGravity([0, 0, -9.8*2])
         self.bt_grippers = {lr : self.bt_env.GetObjectByName(self.grippers[lr].robot.GetName()) for lr in 'lr'}
         self.rope        = bulletsimpy.CapsuleRope(self.bt_env, 'rope', rope_pts, self.rope_params)
 

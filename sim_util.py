@@ -12,6 +12,7 @@ import re
 from rapprentice import animate_traj, ropesim, ros2rave, math_utils as mu
 import ropesim_floating
 
+
 PR2_L_POSTURES = dict(
     untucked = [0.4,  1.0,   0.0,  -2.05,  0.0,  -0.1,  0.0],
     tucked = [0.06, 1.25, 1.79, -1.68, -1.73, -0.10, -0.09],
@@ -89,6 +90,21 @@ def make_cylinder_xml(name, translation, radius, height):
 def project_point_cloud_z(cloud, height):
     cloud[:, 2] = height
     return cloud
+
+def rotate_point_cloud_tfm(cloud):
+    A = np.cov(cloud.T)
+    U, _, _ = np.linalg.svd(A)
+    
+    if U[2, -1] < 0:
+        dir = -U[:, -1]
+    else:
+        dir = U[:, -1]
+        
+    center_xyz = np.median(cloud, axis=0)
+    axis = np.cross(dir, [0,0,1])
+    angle = np.arccos(np.dot(dir, [0,0,1]))
+    tfm = openravepy.matrixFromAxisAngle(axis, angle)
+    return tfm
 
 def reset_arms_to_side(sim_env, floating=False):
     print "RESET_ARMS_TO_SIDE, floating:", floating
@@ -415,7 +431,7 @@ def replace_rope(new_rope, sim_env, floating=False, rope_params=None):
         sim_env.sim = ropesim.Simulation(sim_env.env, sim_env.robot, rope_params)
     else:
         if not sim_env.sim:
-            sim_env.sim = ropesim_floating.FloatingGripperSimulation(sim_env.env)
+            sim_env.sim = ropesim_floating.FloatingGripperSimulation(sim_env.env, rope_params)
 
     sim_env.sim.create(new_rope)
 
@@ -433,11 +449,11 @@ def get_rope_params(params_id):
         rope_params.angLimit = .4
         rope_params.linStopErp = .2
     elif params_id == 'thick':
-        rope_params.radius = 0.01
+        rope_params.radius = 0.005
         rope_params.angStiffness = .1
         rope_params.angDamping = 1
         rope_params.linDamping = .75
-        rope_params.angLimit = .4
+        rope_params.angLimit = .3
         rope_params.linStopErp = .2
     elif params_id.startswith('stiffness'):
         try:
