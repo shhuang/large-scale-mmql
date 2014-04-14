@@ -454,7 +454,7 @@ def get_rope_params(params_id):
         rope_params.angDamping = 1
         rope_params.linDamping = .75
         rope_params.angLimit = .3
-        rope_params.linStopErp = .2
+        rope_params.linStopErp = .5
     elif params_id.startswith('stiffness'):
         try:
             stiffness = float(re.search(r'stiffness(.*)', params_id).group(1))

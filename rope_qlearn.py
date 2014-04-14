@@ -772,7 +772,7 @@ def registration_cost(xyz_src, xyz_targ, src_interest_pts=None):
     scaled_xyz_targ, targ_params = registration.unit_boxify(xyz_targ)
     f,g = registration.tps_rpm_bij(scaled_xyz_src, scaled_xyz_targ, plot_cb=None,
                                    plotting=0, rot_reg=np.r_[1e-4, 1e-4, 1e-1], 
-                                   n_iter=50, reg_init=10, reg_final=.1, outlierfrac=1e-2,
+                                   n_iter=100, reg_init=10, reg_final=.1, outlierfrac=1e-2,
                                    x_weights=weights)
     cost = registration.tps_reg_cost(f) + registration.tps_reg_cost(g)
     return f, src_params, g, targ_params, cost
