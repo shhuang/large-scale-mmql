@@ -1,6 +1,7 @@
 import bulletsimpy
 import numpy as np
 from rapprentice import math_utils, resampling, retiming
+from openravepy import matrixFromAxisAngle
 
 def transform(hmat, p):
     return hmat[:3,:3].dot(p) + hmat[:3,3]
@@ -94,7 +95,7 @@ class FloatingGripper(object):
 
 
 class FloatingGripperSimulation(object):
-    def __init__(self, env):
+    def __init__(self, env, rope_params=None):
         self.env      = env
         self.grippers = None
         self.__init_grippers__()
@@ -102,26 +103,31 @@ class FloatingGripperSimulation(object):
         self.bt_robot = None
         self.rope     = None
         self.constraints = {"l": [], "r": []}
+        
+        
+        if rope_params:
+            self.rope_params = rope_params
+        else:
+            self.rope_params = bulletsimpy.CapsuleRopeParams()
+            #radius: A larger radius means a thicker rope.
+            self.rope_params.radius = 0.005
+            #angStiffness: a rope with a higher angular stifness seems to have more resistance to bending.
+            #orig self.rope_params.angStiffness = .1
+            self.rope_params.angStiffness = .1
+            #A higher angular damping causes the ropes joints to change angle slower.
+            #This can cause the rope to be dragged at an angle by the arm in the air, instead of falling straight.
+            #orig self.rope_params.angDamping = 1
+            self.rope_params.angDamping = 1
+            #orig self.rope_params.linDamping = .75
+            #Not sure what linear damping is, but it seems to limit the linear accelertion of centers of masses.
+            self.rope_params.linDamping = .75
+            #Angular limit seems to be the minimum angle at which the rope joints can bend.
+            #A higher angular limit increases the minimum radius of curvature of the rope.
+            self.rope_params.angLimit = .4
+            #TODO--Find out what the linStopErp is
+            #This could be the tolerance for error when the joint is at or near the joint limit
+            self.rope_params.linStopErp = .2      
 
-        self.rope_params = bulletsimpy.CapsuleRopeParams()
-        #radius: A larger radius means a thicker rope.
-        self.rope_params.radius = 0.005
-        #angStiffness: a rope with a higher angular stifness seems to have more resistance to bending.
-        #orig self.rope_params.angStiffness = .1
-        self.rope_params.angStiffness = .1
-        #A higher angular damping causes the ropes joints to change angle slower.
-        #This can cause the rope to be dragged at an angle by the arm in the air, instead of falling straight.
-        #orig self.rope_params.angDamping = 1
-        self.rope_params.angDamping = 1
-        #orig self.rope_params.linDamping = .75
-        #Not sure what linear damping is, but it seems to limit the linear accelertion of centers of masses.
-        self.rope_params.linDamping = .75
-        #Angular limit seems to be the minimum angle at which the rope joints can bend.
-        #A higher angular limit increases the minimum radius of curvature of the rope.
-        self.rope_params.angLimit = .4
-        #TODO--Find out what the linStopErp is
-        #This could be the tolerance for error when the joint is at or near the joint limit
-        self.rope_params.linStopErp = .2
 
     def __init_grippers__(self):
         """
@@ -179,8 +185,46 @@ class FloatingGripperSimulation(object):
         lengths = np.r_[0, self.rope.GetHalfHeights() * 2]
         summed_lengths = np.cumsum(lengths)
         assert len(lengths) == len(pts)
-        return math_utils.interp2d(np.linspace(0, summed_lengths[-1], upsample*len(pts)), summed_lengths, pts)
+        upsampled_pts = math_utils.interp2d(np.linspace(0, summed_lengths[-1], upsample*len(lengths)), summed_lengths, pts)
+        
+        return upsampled_pts
+                
+    def observe_cloud2(self, radius, axis_upsample=0, radius_sample=0, angle_sample=0):
+        axis_pts = self.rope.GetControlPoints()
+        indices = range(len(axis_pts))
+        if axis_upsample != 0:
+            lengths = np.r_[0, self.rope.GetHalfHeights() * 2]
+            summed_lengths = np.cumsum(lengths)
+            assert len(lengths) == len(axis_pts)
+            indices = np.interp(np.linspace(0, summed_lengths[-1], axis_upsample*len(lengths)), summed_lengths, indices)
+            axis_pts = math_utils.interp2d(np.linspace(0, summed_lengths[-1], axis_upsample*len(lengths)), summed_lengths, axis_pts)
+        
+        half_heights = self.rope.GetHalfHeights()
+        rotates = self.rope.GetRotations()
+        translates = self.rope.GetTranslations()
+        new_pts = []
+        for r in range(1, radius_sample+1):
+            d = r * radius / float(radius_sample) 
+            for a in range(angle_sample):
+                local_rotate = matrixFromAxisAngle([a/float(angle_sample)*2*np.pi,0,0])[:3,:3]
+                for index in indices:
+                    node_id = np.min([np.floor(index), len(self.rope.GetNodes()) - 1])
+                    h = half_heights[node_id]
+                    v = np.array([-h + 2*h*(index-node_id),d,0])
+                    rotate = rotates[node_id]
+                    translate = translates[node_id]
+                    v = rotate.dot(local_rotate.dot(v)) + translate
+                    new_pts.append(v)
 
+        for pt in axis_pts:
+            new_pts.append(pt)
+                
+        return new_pts
+        
+        
+        
+        
+            
     def grab_rope(self, lr):
         """Grab the rope with the gripper in simulation and return True if it grabbed it, else False."""
         #GetNodes returns some sort of list of the positions of the centers of masses of the capsules.

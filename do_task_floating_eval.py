@@ -6,7 +6,7 @@ import argparse
 import eval_util, sim_util
 
 from rapprentice import colorize, task_execution, planning, resampling, \
-        rope_initialization, clouds, math_utils as mu
+        rope_initialization, clouds, plotting_openrave, math_utils as mu
 import pdb, time
 
 import trajoptpy, openravepy
@@ -47,6 +47,7 @@ class GlobalVars:
     gripper_weighting = False
     init_tfm = None
     table_height = 0.
+    rope_observe_cloud_upsample=0
 
 def get_ds_cloud(sim_env, action):
     return clouds.downsample(GlobalVars.actions[action]['cloud_xyz'], DS_SIZE)
@@ -69,15 +70,20 @@ def warp_hmats_tfm(xyz_src, xyz_targ, hmat_list, src_interest_pts = None):
         # First transform hmats from the camera frame into the frame of the robot
         hmats_tfm = np.asarray([GlobalVars.init_tfm.dot(h) for h in hmats])
         trajs[k] = f.transform_hmats(hmats_tfm)
-    xyz_src_warped = f.transform_points(xyz_src)
-    return [trajs, cost, xyz_src_warped]
+    xyz_src_warped = f.transform_points(xyz_src)    
+    return [trajs, cost, xyz_src_warped, f]
 
 def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, animate=False, interactive=False):
     redprint("Generating end-effector trajectory")    
     
+    
     old_xyz = np.squeeze(seg_info["cloud_xyz"])
     old_xyz = clouds.downsample(old_xyz, DS_SIZE)
+    l1 = len(old_xyz)
     new_xyz = clouds.downsample(new_xyz, DS_SIZE)
+    l2 = len(new_xyz)
+    print l1, l2
+    
             
     link_names = ["%s_gripper_tool_frame"%lr for lr in ('lr')]
     hmat_list = [(lr, seg_info[ln]['hmat']) for lr, ln in zip('lr', link_names)]
@@ -85,14 +91,21 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
         interest_pts = get_closing_pts(seg_info)
     else:
         interest_pts = None
-    lr2eetraj, _, old_xyz_warped = warp_hmats_tfm(old_xyz, new_xyz, hmat_list, interest_pts)
-    
+    lr2eetraj, _, old_xyz_warped, f = warp_hmats_tfm(old_xyz, new_xyz, hmat_list, interest_pts)
+
 
     handles = []
     if animate:
-        handles.append(sim_env.env.plot3(old_xyz,5, (1,0,0)))
-        handles.append(sim_env.env.plot3(new_xyz,5, (0,0,1)))
-        handles.append(sim_env.env.plot3(old_xyz_warped,5, (0,1,0)))
+        handles.extend(plotting_openrave.draw_grid(sim_env.env, f.transform_points, old_xyz.min(axis=0)-np.r_[0,0,.1], old_xyz.max(axis=0)+np.r_[0,0,.1], xres = .1, yres = .1, zres = .04))
+        handles.append(sim_env.env.plot3(old_xyz,5, (1,0,0))) # red: demonstration point cloud
+        handles.append(sim_env.env.plot3(new_xyz,5, (0,0,1))) # blue: rope nodes
+        handles.append(sim_env.env.plot3(old_xyz_warped,5, (0,1,0))) # green: warped point cloud from demonstration
+        
+        mapped_pts = []
+        for i in range(len(old_xyz)):
+            mapped_pts.append(old_xyz[i])
+            mapped_pts.append(old_xyz_warped[i])
+        handles.append(sim_env.env.drawlinelist(np.array(mapped_pts), 1, [0.1,0.1,1]))
         
     for lr in 'lr':
         handles.append(sim_env.env.drawlinestrip(lr2eetraj[lr][:,:3,3], 2, (0,1,0,1)))
@@ -109,7 +122,8 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
     print colorize.colorize("mini segments:", "red"), miniseg_starts, miniseg_ends
     miniseg_trajs = []
     prev_vals = {lr:None for lr in 'lr'}
-
+    
+    
     for (i_miniseg, (i_start, i_end)) in enumerate(zip(miniseg_starts, miniseg_ends)):            
 
         ################################    
@@ -127,7 +141,7 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
                     end_trans_trajs[i-i_start, 3:] = lr2eetraj[lr][i][:3,3]
 
         if True:
-            adaptive_times, end_trans_trajs = resampling.adaptive_resample2(end_trans_trajs, 0.01)
+            adaptive_times, end_trans_trajs = resampling.adaptive_resample2(end_trans_trajs, 0.005)
         else:
             adaptive_times = range(len(end_trans_trajs))
             
@@ -136,18 +150,52 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
         for lr in 'lr':
             #ee_hmats = resampling.interp_hmats(np.arange(i_end+1-i_start), np.arange(i_end+1-i_start), lr2eetraj[lr][i_start:i_end+1])
             ee_hmats = resampling.interp_hmats(adaptive_times, np.arange(i_end+1-i_start), lr2eetraj[lr][i_start:i_end+1])
+            
+            # the interpolation above will then the velocity of the trajectory (since there are fewer waypoints). Resampling again to make sure 
+            # the trajectory has the same number of waypoints as before.
+            ee_hmats = resampling.interp_hmats(np.arange(i_end+1-i_start), adaptive_times, ee_hmats)
+            
             # if arm_moved(ee_hmats, floating=True):
             if True:
-                miniseg_traj[lr] = ee_hmats;
+                miniseg_traj[lr] = ee_hmats
                 
-        miniseg_trajs.append(miniseg_traj);
-        
-        for miniseg_traj in miniseg_trajs:
-            for lr in 'lr':
-                hmats = np.asarray(miniseg_traj[lr])
-                handles.append(sim_env.env.drawlinestrip(hmats[:,:3,3], 2, (0,0,1,1)))
 
+        
+        safe_drop = {'l': True, 'r': True}
+        for lr in 'lr':
+            next_gripper_open = lr_open[lr][i_miniseg+1] if i_miniseg < len(miniseg_starts) - 1 else False
+            gripper_open = lr_open[lr][i_miniseg] 
+            
+            if next_gripper_open and not gripper_open:
+                tfm = miniseg_traj[lr][-1]
+                if tfm[2,3] > GlobalVars.table_height + 0.01:
+                    safe_drop[lr] = False
+                    
+        #safe_drop = {'l': True, 'r': True}             
+                
+        if not (safe_drop['l'] and safe_drop['r']):
+            for lr in 'lr':
+                
+                if not safe_drop[lr]:
+                    tfm = miniseg_traj[lr][-1]
+                    for i in range(1, 8):
+                        safe_drop_tfm = tfm
+                        safe_drop_tfm[2,3] = tfm[2,3] - i / 10. * (tfm[2,3] - GlobalVars.table_height - 0.01)
+                        miniseg_traj[lr].append(safe_drop_tfm)
+                else:
+                    for i in range(1, 8):
+                        miniseg_traj[lr].append(miniseg_traj[lr][-1])
+                     
+                
+        miniseg_trajs.append(miniseg_traj)
+        
+
+        for lr in 'lr':
+            hmats = np.asarray(miniseg_traj[lr])
+            handles.append(sim_env.env.drawlinestrip(hmats[:,:3,3], 2, (0,0,1,1)))
+            
         redprint("Executing joint trajectory for part %i using arms '%s'"%(i_miniseg, miniseg_traj.keys()))
+          
         
         for lr in 'lr':
             gripper_open = lr_open[lr][i_miniseg]
@@ -187,6 +235,8 @@ def set_global_vars(args, sim_env):
     GlobalVars.actions = h5py.File(args.actionfile, 'r')
     if args.subparser_name == "eval":
         GlobalVars.gripper_weighting = args.gripper_weighting
+        
+    GlobalVars.rope_observe_cloud_upsample = 2
 
 def parse_input_args():
     parser = argparse.ArgumentParser()
@@ -278,7 +328,7 @@ def eval_on_holdout(args, sim_env):
 
         # don't call replace_rope and sim.settle() directly. use time machine interface for deterministic results!
         
-        time_machine = sim_util.RopeSimTimeMachine(rope_nodes, sim_env, floating=True)
+        time_machine = sim_util.RopeSimTimeMachine(rope_nodes, sim_env, rope_params=sim_util.get_rope_params("thick"), floating=True)
 
         if args.animation:
             sim_env.viewer.Step()
@@ -290,7 +340,7 @@ def eval_on_holdout(args, sim_env):
             sim_util.reset_arms_to_side(sim_env, floating=True)
 
             redprint("Observe point cloud")
-            new_xyz = sim_env.sim.observe_cloud()
+            new_xyz = sim_env.sim.observe_cloud(GlobalVars.rope_observe_cloud_upsample)
             state = ("eval_%i"%get_unique_id(), new_xyz)
             
             redprint("Choosing an action")
@@ -305,8 +355,8 @@ def eval_on_holdout(args, sim_env):
             for depth in range(args.lookahead_depth):
                 expansion_results = []
                 for (branch, (q, a, chkpt, r_a)) in enumerate(agenda):
-                    time_machine.restore_from_checkpoint(chkpt, sim_env, sim_util.get_rope_params(args.lookahead_rope_params))
-                    cur_xyz = sim_env.sim.observe_cloud()
+                    time_machine.restore_from_checkpoint(chkpt, sim_env, rope_params=sim_util.get_rope_params("thick"))
+                    cur_xyz = sim_env.sim.observe_cloud(GlobalVars.rope_observe_cloud_upsample)
                     success, _, _, full_trajs = \
                         compute_trans_traj(sim_env, cur_xyz, GlobalVars.actions[a], animate=args.animation, interactive=False)
                     if args.animation:
@@ -314,7 +364,7 @@ def eval_on_holdout(args, sim_env):
                     if is_knot(sim_env.sim.rope.GetControlPoints()):
                         best_root_action = r_a
                         break
-                    result_cloud = sim_env.sim.observe_cloud()
+                    result_cloud = sim_env.sim.observe_cloud(GlobalVars.rope_observe_cloud_upsample)
                     result_chkpt = 'depth_%i_branch_%i_%i'%(depth+1, branch, i_step)
                     if depth != args.lookahead_depth-1: # don't save checkpoint at the last depth to save computation time
                         time_machine.set_checkpoint(result_chkpt, sim_env)
@@ -340,7 +390,7 @@ def eval_on_holdout(args, sim_env):
             if best_root_action is None:
                 best_root_action = agenda[0][-1]
             
-            time_machine.restore_from_checkpoint('depth_0_%i'%i_step, sim_env, sim_util.get_rope_params(args.exec_rope_params))
+            time_machine.restore_from_checkpoint('depth_0_%i'%i_step, sim_env, rope_params=sim_util.get_rope_params("thick"))
             eval_stats = eval_util.EvalStats()
             eval_stats.success, eval_stats.feasible, eval_stats.misgrasp, full_trajs = \
                 compute_trans_traj(sim_env, new_xyz, GlobalVars.actions[best_root_action], animate=args.animation, interactive=args.interactive)
@@ -366,7 +416,6 @@ def eval_demo_playback(args, sim_env):
     num_successes = 0
     num_total = 0
     
-    
     actions_names = []
     for action_name in actionfile:
         actions_names.append(action_name)
@@ -390,7 +439,6 @@ def eval_demo_playback(args, sim_env):
             sim_util.reset_arms_to_side(sim_env, floating=True)
             redprint("Replace rope")
             rope_xyz = np.asarray(actionfile[actions_names[i]]['cloud_xyz'])
-            #rope_xyz = rope_xyz.dot(GlobalVars.init_tfm[:3,:3].T) + GlobalVars.init_tfm[:3,3][None,:]
             rope_nodes = rope_initialization.find_path_through_point_cloud(rope_xyz)
             
             # don't call replace_rope and sim.settle() directly. use time machine interface for deterministic results!
@@ -403,7 +451,8 @@ def eval_demo_playback(args, sim_env):
         sim_util.reset_arms_to_side(sim_env, floating=True)
             
         redprint("Observe point cloud")
-        new_xyz = sim_env.sim.observe_cloud()
+        #new_xyz = sim_env.sim.observe_cloud(GlobalVars.rope_observe_cloud_upsample)
+        new_xyz = sim_env.sim.observe_cloud2(0.01, GlobalVars.rope_observe_cloud_upsample, 1, 4)
         state = ("eval_%i"%get_unique_id(), new_xyz) 
         
         action = actions_names[i]
@@ -413,6 +462,8 @@ def eval_demo_playback(args, sim_env):
         compute_trans_traj(sim_env, new_xyz, GlobalVars.actions[action], animate=args.animation, interactive=args.interactive)
                         
         i += 1
+        
+    num_total += 1
 
     redprint('Eval Successes / Total: ' + str(num_successes) + '/' + str(num_total))        
 
@@ -449,7 +500,7 @@ def replay_on_holdout(args, sim_env):
             sim_util.reset_arms_to_side(sim_env, floating=True)
 
             redprint("Observe point cloud")
-            new_xyz = sim_env.sim.observe_cloud()
+            new_xyz = sim_env.sim.observe_cloud(GlobalVars.rope_observe_cloud_upsample)
     
             eval_stats = eval_util.EvalStats()
 
@@ -487,6 +538,9 @@ def load_simulation(args, sim_env):
     GlobalVars.init_tfm = fakedatafile['init_tfm'][()]
     
     init_rope_xyz, _ = sim_util.load_fake_data_segment(sim_env, fakedatafile, args.fake_data_segment, args.fake_data_transform, floating=True) # this also sets the torso (torso_lift_joint) to the height in the data
+    GlobalVars.init_tfm = GlobalVars.init_tfm
+    
+
     
     # Set table height to correct height of first rope in holdout set
     holdoutfile = h5py.File(args.holdoutfile, 'r')
@@ -495,7 +549,8 @@ def load_simulation(args, sim_env):
     if 'frame' not in first_holdout or first_holdout['frame'][()] != 'r':
         init_rope_xyz = init_rope_xyz.dot(GlobalVars.init_tfm[:3,:3].T) + GlobalVars.init_tfm[:3,3][None,:]
 
-    table_height = init_rope_xyz[:,2].mean() - .02  # Before: .02
+
+    table_height = init_rope_xyz[:,2].mean() - .02 # Before: .02
     GlobalVars.table_height = table_height
     table_xml = sim_util.make_table_xml(translation=[1, 0, table_height], extents=[.85, .55, .01])
     sim_env.env.LoadData(table_xml)
