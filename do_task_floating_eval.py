@@ -123,7 +123,6 @@ def compute_trans_traj(sim_env, new_xyz, seg_info, ignore_infeasibility=True, an
     miniseg_trajs = []
     prev_vals = {lr:None for lr in 'lr'}
     
-    
     for (i_miniseg, (i_start, i_end)) in enumerate(zip(miniseg_starts, miniseg_ends)):            
 
         ################################    

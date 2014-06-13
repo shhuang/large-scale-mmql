@@ -219,7 +219,7 @@ class FloatingGripperSimulation(object):
         for pt in axis_pts:
             new_pts.append(pt)
                 
-        return new_pts
+        return np.array(new_pts)
         
         
         
